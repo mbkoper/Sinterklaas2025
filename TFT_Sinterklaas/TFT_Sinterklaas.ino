@@ -1,29 +1,3 @@
-/*
-  TFT_Sinterklaas.ino
-
-  Purpose
-  - E-reader-style demo for an ESP32S3 with TFT and capacitive touch.
-  - Connects as WiFi STA to ESP32_MP3_AP and controls a remote MP3+LED module at 192.168.4.1
-    - On WiFi startup: set volume to DEFAULT_VOLUME (15)
-    - When the initial screen is shown: start playing track 1 (if music enabled)
-    - On page change: request play?track=<page>
-    - Top-left touch toggles music -> sends /stop or /play
-    - Touch within the first 3 seconds after first draw will set volume to 6 and
-      that touch will not cause page forward/back navigation.
-    - LED effects are offloaded to the MP3+LED ESP32 via HTTP calls.
-
-  Hardware pins (summary)
-  - TFT I2C SDA:        GPIO 16
-  - TFT I2C SCL:        GPIO 15
-  - Touch RST_N_PIN:    GPIO 18
-  - Touch INT_N_PIN:    GPIO 17
-  - Serial: 115200 for debug
-
-  Notes
-  - Touch controller mapping uses tp.tp[0].y as "x" and tp.tp[0].x as "y".
-    "Top-left" region on your rotated panel corresponds to touchX > 225, small Y.
-*/
-
 #include <TFT_eSPI.h>
 #include <FT6336U.h>
 #include <Wire.h>
@@ -31,383 +5,411 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
-// Display / Touch pins and screen size
-#define SCREEN_WIDTH  240
+#define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
 #define I2C_SDA 16
 #define I2C_SCL 15
 #define RST_N_PIN 18
 #define INT_N_PIN 17
 
-// WiFi and remote MP3+LED module
-const char* WIFI_SSID      = "ESP32_MP3_AP";
-const char* WIFI_PASSWORD  = "12345678";
-const char* AUDIO_BASE_URL = "http://192.168.4.1";
-
-// Volume and touch-window config
-const int DEFAULT_VOLUME = 15;
-const unsigned long TOUCH_VOLUME_WINDOW_MS = 3000UL;
-
-// Display color inversion fix
 #define FIX_INVERTED_COLORS true
 
-// LED function for each page (mapped to remote LED effects)
-enum LedFunction {
-  LEDFUNC_OFF = 0,
-  LEDFUNC_RAINBOW = 1,
-  LEDFUNC_FLASHING_YELLOW = 2,
-  LEDFUNC_FLASHING_RED = 3,
-  LEDFUNC_THUNDER = 4
-};
+const char* WIFI_SSID="ESP32_MP3_AP";
+const char* WIFI_PASSWORD="12345678";
+const char* AUDIO_BASE_URL="http://192.168.4.1";
 
-// TFT and touch objects
-TFT_eSPI tft = TFT_eSPI();
-FT6336U ft6336u(I2C_SDA, I2C_SCL, RST_N_PIN, INT_N_PIN);
-FT6336U_TouchPointType tp;
+// animation types
+enum AnimationType{ANIM_NONE,ANIM_SHAKE,ANIM_INVERT};
 
-// Page animation types
-enum AnimationType {
-  ANIM_NONE,
-  ANIM_SHAKE,
-  ANIM_INVERT
-};
+// LED function for each page (mapped to remote LED effects on MP3+LED module)
+enum LedFunction{LEDFUNC_OFF=0,LEDFUNC_RAINBOW=1,LEDFUNC_FLASHING_YELLOW=2,LEDFUNC_FLASHING_RED=3,LEDFUNC_THUNDER=4};
 
-// Page descriptor with LED function
-struct PageData {
-  const uint16_t* image;
-  const char* text;
+// global volume mode: affects all pages
+enum VolumeMode{VOL_FULL=0,VOL_HALF=1,VOL_NONE=2};
+
+// per-page configuration: picture, text, color, animation, audio track, volume, optional max play time, LED function
+struct PageData{
+  const uint16_t*image;
+  const char*text;
   uint16_t color;
   AnimationType animation;
-  LedFunction ledFunc;
+  int track;          // audio track number; <=0 means no track
+  int volume;         // base volume for this page
+  int maxPlaySeconds; // -1 = endless, >0 = auto stop after given seconds
+  LedFunction ledFunc;// LED mode for this page
 };
 
 #define NUM_PAGES 8
 #define TEXT_FONT 2
 
-// Story pages: last parameter selects remote LED behavior
-const PageData pages[NUM_PAGES] = {
-  { page0, "", TFT_WHITE, ANIM_NONE,   LEDFUNC_OFF },
-  { page1, "Introduction\n\nSwipe to start.", TFT_WHITE, ANIM_NONE,   LEDFUNC_RAINBOW },
-  { page2, "Chapter 1\n\nThe Story Begins\nIt was a dark night.", TFT_WHITE, ANIM_NONE,   LEDFUNC_RAINBOW },
-  { page3, "Chapter 2\n\nSomething is wrong...", TFT_WHITE, ANIM_NONE,   LEDFUNC_FLASHING_YELLOW },
-  { bomb, "", TFT_RED, ANIM_SHAKE,  LEDFUNC_THUNDER },
-  { jollyroger, "DANGER!\nSYSTEM FAILURE\nEVACUATE", TFT_RED, ANIM_INVERT, LEDFUNC_FLASHING_RED },
-  { page4, "Chapter 3\n\nThat was close.\nWe survived.", TFT_WHITE, ANIM_NONE,   LEDFUNC_RAINBOW },
-  { page5, "The End\n\nThanks for reading!", TFT_BLACK, ANIM_NONE,   LEDFUNC_OFF }
+const PageData pages[NUM_PAGES]={
+  {page0,"",TFT_BLACK,ANIM_NONE,1,12,-1,LEDFUNC_OFF},
+  {page1,"Een ie-rieder vervangt stapels papier,\nGewoon een handig dingetje, dat geeft plezier.\nGeen kreukels, geen ezelsoren meer,\nMaar strak digitaal, keer op keer.",TFT_BLACK,ANIM_NONE,2,14,-1,LEDFUNC_RAINBOW},
+  {page2,"Je kiest een roman of een spannend verhaal,\nEn leest het meteen, digitaal en ideaal,\nJe bladert nu licht, zo snel en fijn,\nMet honderden titels in een klein design.",TFT_BLACK,ANIM_NONE,6,14,-1,LEDFUNC_RAINBOW},
+  {page3,"De batterij houdt dagenlang stand,\nDus lezen kan overal in het land,\nDe pieten zagen je boeken verslinden,\nMaar soms was het lastig om ze te vinden",TFT_BLACK,ANIM_NONE,5,10,-1,LEDFUNC_FLASHING_YELLOW},
+  {bomb,"",TFT_RED,ANIM_SHAKE,9,26,3,LEDFUNC_THUNDER},
+  {jollyroger,"EEN PIRAAT!\nDIT KAN TOCH\nNIET WAAR ZIJN",TFT_RED,ANIM_INVERT,8,20,12,LEDFUNC_FLASHING_RED},
+  {page4,"Piraat zijn! Sint fronste zijn wenkbrauw,\nCorina, dit gedrag past echt niet bij jou,\nWant boeken “stelen”, goede vrind,\nVerdien je geen applaus van de Sint.",TFT_BLACK,ANIM_NONE,3,14,-1,LEDFUNC_RAINBOW},
+  {page5,"Zoek het cadeau dat je beter kan maken,\nZodat je piraat activiteiten kunt staken,\nMet dit geschenk lees je eerlijk en fijn,\nEn zal de Sint weer vast tevreden zijn.",TFT_BLACK,ANIM_NONE,4,14,-1,LEDFUNC_OFF}
 };
 
-// Animation / state variables
-unsigned long lastFrameTime = 0;
-int shakeX = 0, shakeY = 0;
-bool isFlashed = false;
+TFT_eSPI tft=TFT_eSPI();
+FT6336U ft6336u(I2C_SDA,I2C_SCL,RST_N_PIN,INT_N_PIN);
+FT6336U_TouchPointType tp;
 
-int currentPage = 0;
-bool needsUpdate = true;
-bool firstDrawDone = false;
-bool musicEnabled = true;
-bool wifiConnected = false;
+// animation state
+unsigned long lastFrameTime=0;
+int shakeX=0;
+int shakeY=0;
+bool isFlashed=false;
 
-// Touch-volume window state
-unsigned long firstDrawTime = 0;
-bool touchVolumeWindowActive = false;
+// page, audio and wifi state
+int currentPage=0;
+bool needsUpdate=true;
+bool firstDrawDone=false;
+bool musicEnabled=true;
+bool wifiConnected=false;
 
-// Touch debounce
-unsigned long lastTouchHandled = 0;
-const unsigned long TOUCH_DEBOUNCE_MS = 200;
+// audio timing and volume tracking
+int currentAudioPage=-1;
+unsigned long currentAudioStartMillis=0;
+bool audioPlaying=false;
+int currentVolume=-1;  // last volume sent to the server; -1 = unknown/not set
 
-// ---------------------------------------------------------
-// HTTP helpers
-// ---------------------------------------------------------
+// global volume mode
+VolumeMode currentVolumeMode=VOL_FULL;
 
-void httpGet(const String& url) {
-  if (!wifiConnected || WiFi.status() != WL_CONNECTED) {
-    Serial.println(F("[HTTP] GET skipped, WiFi not connected"));
+// ------------- HTTP / LED helpers -------------
+
+void httpGet(const String&url){
+  if(!wifiConnected||WiFi.status()!=WL_CONNECTED){
+    Serial.println("[HTTP] GET skipped, WiFi not connected");
     return;
   }
   HTTPClient http;
-  Serial.print(F("[HTTP] GET: "));
+  Serial.print("[HTTP] GET: ");
   Serial.println(url);
   http.begin(url);
-  int httpCode = http.GET();
-  if (httpCode > 0) {
-    Serial.print(F("[HTTP] Response code: "));
+  int httpCode=http.GET();
+  if(httpCode>0){
+    Serial.print("[HTTP] Response code: ");
     Serial.println(httpCode);
-    String payload = http.getString();
-    if (payload.length()) {
-      Serial.print(F("[HTTP] Payload: "));
+    String payload=http.getString();
+    if(payload.length()>0){
+      Serial.print("[HTTP] Payload: ");
       Serial.println(payload);
     }
-  } else {
-    Serial.print(F("[HTTP] Request failed: "));
+  }else{
+    Serial.print("[HTTP] Request failed: ");
     Serial.println(http.errorToString(httpCode));
   }
   http.end();
 }
 
-// Volume helpers on remote module
-void setVolume(int val) {
-  Serial.print(F("[AUDIO] Setting volume to "));
-  Serial.println(val);
-  char url[64];
-  snprintf(url, sizeof(url), "%s/volume?val=%d", AUDIO_BASE_URL, val);
-  httpGet(String(url));
+void remoteSetLedEffect(LedFunction f){
+  String url=String(AUDIO_BASE_URL)+"/led/mode?mode="+String((int)f);
+  httpGet(url);
 }
-void setInitialVolume() { setVolume(DEFAULT_VOLUME); }
 
-// Play helpers on remote module
-void playTrackForPage(int pageIndex) {
-  int trackNumber = pageIndex + 1;
-  Serial.print(F("[AUDIO] Request play track "));
-  Serial.println(trackNumber);
-  if (!musicEnabled) {
-    Serial.println(F("[AUDIO] Music disabled - skipping play"));
+void remotePageWipeForPage(int oldPage,int newPage){
+  if(oldPage==newPage)return;
+  const char*dir=(newPage>oldPage)?"right":"left";
+  String url=String(AUDIO_BASE_URL)+"/led/pagewipe?color=ffffff&dir="+String(dir);
+  httpGet(url);
+}
+
+// ------------- Volume helpers -------------
+
+// compute volume for a given page based on global volume mode
+int computeVolumeForPage(int pageIndex){
+  if(pageIndex<0||pageIndex>=NUM_PAGES)return 0;
+  int base=pages[pageIndex].volume;
+  if(base<0)base=0;
+
+  switch(currentVolumeMode){
+    case VOL_FULL:
+      return base;
+    case VOL_HALF:
+      if(base<=1)return base>0?1:0;
+      return base/2;
+    case VOL_NONE:
+    default:
+      return 0;
+  }
+}
+
+// send a volume command to the audio server and remember it, only if changed
+void setVolume(int vol){
+  if(vol<0)return; // allow 0 for "mute"
+  if(currentVolume==vol){
+    Serial.print("[AUDIO] Volume unchanged (");
+    Serial.print(vol);
+    Serial.println(")");
     return;
   }
-  char url[64];
-  snprintf(url, sizeof(url), "%s/play?track=%d", AUDIO_BASE_URL, trackNumber);
-  httpGet(String(url));
-}
-void sendGlobalPlay() { httpGet(String(AUDIO_BASE_URL) + "/play"); }
-void sendStop()       { httpGet(String(AUDIO_BASE_URL) + "/stop"); }
-
-// ---------------------------------------------------------
-// Remote LED control (calls MP3+LED module)
-// ---------------------------------------------------------
-void remoteSetLedEffect(LedFunction f) {
-  char url[64];
-  // map LedFunction 0..4 to remote LED modes 0..7; direct mapping to 0..4 used
-  snprintf(url, sizeof(url), "%s/led/mode?mode=%d", AUDIO_BASE_URL, (int)f);
-  httpGet(String(url));
+  Serial.print("[AUDIO] Setting volume to ");
+  Serial.println(vol);
+  String url=String(AUDIO_BASE_URL)+"/volume?val="+String(vol);
+  httpGet(url);
+  currentVolume=vol;
 }
 
-// Optional: when page changes, trigger a direction-based page-wipe on LEDs
-void remotePageWipeForPage(int oldPage, int newPage) {
-  if (oldPage == newPage) return;
-  const char* dir = (newPage > oldPage) ? "right" : "left";
-  char url[96];
-  // White pagewipe for now
-  snprintf(url, sizeof(url), "%s/led/pagewipe?color=ffffff&dir=%s", AUDIO_BASE_URL, dir);
-  httpGet(String(url));
+// stop playback on the audio server and clear audio state
+void sendStop(){
+  Serial.println("[AUDIO] Stop playback");
+  String url=String(AUDIO_BASE_URL)+"/stop";
+  httpGet(url);
+  audioPlaying=false;
+  currentAudioPage=-1;
+  currentAudioStartMillis=0;
 }
 
-// ---------------------------------------------------------
-// Drawing helpers
-// ---------------------------------------------------------
-void drawMultilineText(const char* text, int x, int y, int font, uint16_t color) {
-  if (!text || !text[0]) return;
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.setTextFont(font);
+// start playing track for a given page, using current volume mode
+void playTrackForPage(int pageIndex){
+  if(pageIndex<0||pageIndex>=NUM_PAGES){
+    Serial.println("[AUDIO] Invalid page index, skipping play");
+    return;
+  }
+  int trackNumber=pages[pageIndex].track;
+  if(trackNumber<=0){
+    Serial.print("[AUDIO] Page ");
+    Serial.print(pageIndex);
+    Serial.println(" has no track assigned, skipping play");
+    return;
+  }
+  if(!musicEnabled){
+    Serial.println("[AUDIO] Music is disabled, play skipped");
+    return;
+  }
 
-  String s(text);
-  int lineHeight = tft.fontHeight(font) + 2;
-  int yOffset = y;
+  int vol=computeVolumeForPage(pageIndex);
+  setVolume(vol);
 
-  int start = 0;
-  while (true) {
-    int idx = s.indexOf('\n', start);
-    String line;
-    if (idx == -1) {
-      line = s.substring(start);
-    } else {
-      line = s.substring(start, idx);
-    }
-    tft.drawCentreString(line, x, yOffset, font);
-    yOffset += lineHeight;
-    if (idx == -1) break;
-    start = idx + 1;
+  Serial.print("[AUDIO] Request play for page ");
+  Serial.print(pageIndex);
+  Serial.print(" (track ");
+  Serial.print(trackNumber);
+  Serial.print(", vol ");
+  Serial.print(vol);
+  Serial.println(")");
+  String url=String(AUDIO_BASE_URL)+"/play?track="+String(trackNumber);
+  httpGet(url);
+  currentAudioPage=pageIndex;
+  currentAudioStartMillis=millis();
+  audioPlaying=true;
+}
+
+// check whether the current page's audio should stop based on maxPlaySeconds
+void updateAudioTimeout(){
+  if(!audioPlaying)return;
+  if(currentAudioPage<0||currentAudioPage>=NUM_PAGES)return;
+  int limit=pages[currentAudioPage].maxPlaySeconds;
+  if(limit<0)return;
+  unsigned long elapsedMs=millis()-currentAudioStartMillis;
+  if(elapsedMs>=(unsigned long)limit*1000UL){
+    Serial.print("[AUDIO] Auto stop after ");
+    Serial.print(limit);
+    Serial.println(" seconds");
+    sendStop();
   }
 }
 
-void drawCurrentPage() {
-  Serial.print(F("[UI] Drawing page "));
+// ------------- Drawing & animation -------------
+
+void drawMultilineText(String text,int x,int y_center,int font,uint16_t color){
+  if(text=="")return;
+  int fontHeight=tft.fontHeight(font);
+  int lineSpacing=6;
+  int lineCount=1;
+  for(int i=0;i<text.length();i++){
+    if(text.charAt(i)=='\n')lineCount++;
+  }
+  int totalBlockHeight=(lineCount*fontHeight)+((lineCount-1)*lineSpacing);
+  int currentY=y_center-(totalBlockHeight/2);
+  int start=0;
+  int end=text.indexOf('\n');
+  while(end!=-1){
+    String line=text.substring(start,end);
+    tft.setTextColor(TFT_BLACK);
+    tft.drawCentreString(line,x+1,currentY+1,font);
+    tft.setTextColor(color);
+    tft.drawCentreString(line,x,currentY,font);
+    currentY+=(fontHeight+lineSpacing);
+    start=end+1;
+    end=text.indexOf('\n',start);
+  }
+  String lastLine=text.substring(start);
+  tft.setTextColor(TFT_BLACK);
+  tft.drawCentreString(lastLine,x+1,currentY+1,font);
+  tft.setTextColor(color);
+  tft.drawCentreString(lastLine,x,currentY,font);
+}
+
+void drawCurrentPage(){
+  Serial.print("[UI] Drawing page ");
   Serial.println(currentPage);
-
-  isFlashed = false;
+  isFlashed=false;
   tft.invertDisplay(FIX_INVERTED_COLORS);
-
-  // Note: original used 320x240; keep that (image orientation)
   tft.setSwapBytes(true);
-  tft.pushImage(0, 0, 320, 240, pages[currentPage].image);
+  tft.pushImage(0,0,320,240,pages[currentPage].image);
   tft.setSwapBytes(false);
-
-  if (pages[currentPage].animation != ANIM_SHAKE) {
-    drawMultilineText(pages[currentPage].text, tft.width() / 2, tft.height() / 2, TEXT_FONT, pages[currentPage].color);
-    String pageNum = String(currentPage + 1) + "/" + String(NUM_PAGES);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawCentreString(pageNum, tft.width() / 2, tft.height() - 20, 1);
+  if(pages[currentPage].animation!=ANIM_SHAKE){
+    drawMultilineText(pages[currentPage].text,tft.width()/2,tft.height()/2,TEXT_FONT,pages[currentPage].color);
   }
-
-  // Set LED behavior for this page on the remote module
   remoteSetLedEffect(pages[currentPage].ledFunc);
-
-  // On first draw: enable the touch-volume window and auto-play
-  if (!firstDrawDone) {
-    firstDrawDone = true;
-    touchVolumeWindowActive = true;
-    firstDrawTime = millis();
-    Serial.println(F("[UI] First draw done - touch-volume window active"));
-    playTrackForPage(0); // track 1
+  if(!firstDrawDone){
+    firstDrawDone=true;
+    Serial.println("[UI] First draw done");
+    if(musicEnabled){
+      playTrackForPage(currentPage);
+    }
   }
 }
 
-// Simple shake and invert animations (unchanged logic, just rely on lastFrameTime)
-void performShake() {
-  const unsigned long interval = 80;
-  unsigned long now = millis();
-  if (now - lastFrameTime > interval) {
-    lastFrameTime = now;
-    shakeX = random(-3, 4);
-    shakeY = random(-3, 4);
-    tft.pushImage(shakeX, shakeY, 320, 240, pages[currentPage].image);
+void performShake(){
+  if(millis()-lastFrameTime>40){
+    lastFrameTime=millis();
+    shakeX=random(-8,9);
+    shakeY=random(-8,9);
+    tft.setSwapBytes(true);
+    tft.pushImage(shakeX,shakeY,320,240,pages[currentPage].image);
+    tft.setSwapBytes(false);
   }
 }
 
-void performInvert() {
-  if (millis() - lastFrameTime > 150) {
-    lastFrameTime = millis();
-    isFlashed = !isFlashed;
-    bool state = FIX_INVERTED_COLORS ? !isFlashed : isFlashed;
+void performInvert(){
+  if(millis()-lastFrameTime>150){
+    lastFrameTime=millis();
+    isFlashed=!isFlashed;
+    bool state=FIX_INVERTED_COLORS?!isFlashed:isFlashed;
     tft.invertDisplay(state);
-    uint16_t flashColor = isFlashed ? TFT_YELLOW : TFT_RED;
-    drawMultilineText(pages[currentPage].text, tft.width() / 2, tft.height() / 2, 4, flashColor);
+    uint16_t flashColor=isFlashed?TFT_YELLOW:TFT_RED;
+    drawMultilineText(pages[currentPage].text,tft.width()/2,tft.height()/2,4,flashColor);
   }
 }
 
-// ---------------------------------------------------------
-// Page navigation
-// ---------------------------------------------------------
-void gotoPage(int newPage) {
-  if (newPage < 0) newPage = 0;
-  if (newPage >= NUM_PAGES) newPage = NUM_PAGES - 1;
-  if (newPage == currentPage) {
-    Serial.println(F("[NAV] No page change"));
-    return;
-  }
+// ------------- Setup & main loop -------------
 
-  Serial.print(F("[NAV] Page "));
-  Serial.print(currentPage);
-  Serial.print(F(" -> "));
-  Serial.println(newPage);
-
-  int oldPage = currentPage;
-  currentPage = newPage;
-  needsUpdate = true;
-
-  // Remote LED: start a page-wipe in direction of navigation
-  remotePageWipeForPage(oldPage, currentPage);
-
-  // Remote LED: set effect for the new page (runs after wipe)
-  remoteSetLedEffect(pages[currentPage].ledFunc);
-
-  if (musicEnabled) {
-    playTrackForPage(currentPage);
-  } else {
-    Serial.println(F("[AUDIO] Music disabled; not sending play request"));
-  }
-}
-
-// ---------------------------------------------------------
-// Setup & main loop
-// ---------------------------------------------------------
-void setup(void) {
+void setup(void){
   Serial.begin(115200);
-  delay(200);
+  delay(500);
+  Serial.println();
+  Serial.println("[BOOT] Booting...");
 
-  Serial.print(F("[WiFi] Connecting to "));
+  Serial.print("[WiFi] Connecting to SSID: ");
   Serial.println(WIFI_SSID);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  unsigned long startAttemptTime = millis();
-  const unsigned long wifiTimeout = 10000UL;
-
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < wifiTimeout) {
+  WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
+  unsigned long startAttemptTime=millis();
+  const unsigned long wifiTimeout=10000;
+  while(WiFi.status()!=WL_CONNECTED&&millis()-startAttemptTime<wifiTimeout){
     Serial.print(".");
     delay(500);
   }
   Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.print(F("[WiFi] Connected, IP: "));
+  if(WiFi.status()==WL_CONNECTED){
+    wifiConnected=true;
+    Serial.println("[WiFi] Connected!");
+    Serial.print("[WiFi] IP address: ");
     Serial.println(WiFi.localIP());
-    setInitialVolume();
-  } else {
-    wifiConnected = false;
-    Serial.println(F("[WiFi] Connection timed out"));
+    int initialVol=computeVolumeForPage(0);
+    setVolume(initialVol);
+  }else{
+    wifiConnected=false;
+    Serial.println("[WiFi] Connection timed out.");
   }
 
-  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.begin(I2C_SDA,I2C_SCL);
   tft.init();
   tft.setRotation(1);
   tft.invertDisplay(FIX_INVERTED_COLORS);
   ft6336u.begin();
-
   drawCurrentPage();
 }
 
-void loop() {
-  unsigned long now = millis();
-
-  if (needsUpdate) {
+void loop(){
+  if(needsUpdate){
     drawCurrentPage();
-    needsUpdate = false;
+    needsUpdate=false;
   }
 
-  // Per-page screen animation
-  switch (pages[currentPage].animation) {
-    case ANIM_SHAKE:  performShake();  break;
-    case ANIM_INVERT: performInvert(); break;
+  switch(pages[currentPage].animation){
+    case ANIM_SHAKE:performShake();break;
+    case ANIM_INVERT:performInvert();break;
     case ANIM_NONE:
-    default: break;
+    default:break;
   }
 
-  // Touch handling
-  tp = ft6336u.scan();
-  if (tp.touch_count > 0) {
-    if (now - lastTouchHandled < TOUCH_DEBOUNCE_MS) {
-      return; // debounce
-    }
-    lastTouchHandled = now;
+  updateAudioTimeout();
 
-    int touchX = tp.tp[0].y; // panel mapping
-    int touchY = tp.tp[0].x;
-    Serial.print(F("[TOUCH] x="));
+  tp=ft6336u.scan();
+  if(tp.touch_count>0){
+    int touchX=tp.tp[0].y;
+    int touchY=tp.tp[0].x;
+    Serial.print("[TOUCH] x=");
     Serial.print(touchX);
-    Serial.print(F(" y="));
+    Serial.print(" y=");
     Serial.println(touchY);
 
-    // Early 3s touch-window: volume shortcut
-    if (touchVolumeWindowActive && (now - firstDrawTime) <= TOUCH_VOLUME_WINDOW_MS) {
-      Serial.println(F("[TOUCH] initial 3s: set volume to 6, ignore navigation"));
-      setVolume(6);
-      touchVolumeWindowActive = false;
+    // top-left corner: global volume mode cycle FULL -> HALF -> NONE -> FULL ...
+    if(touchX<25&&touchY>=210){
+      Serial.println("[TOUCH] Top-left corner tapped -> cycle global volume mode");
+
+      if(currentVolumeMode==VOL_FULL){
+        currentVolumeMode=VOL_HALF;
+        Serial.println("[AUDIO] Volume mode: HALF");
+      }else if(currentVolumeMode==VOL_HALF){
+        currentVolumeMode=VOL_NONE;
+        Serial.println("[AUDIO] Volume mode: NONE (mute)");
+      }else{ // VOL_NONE
+        currentVolumeMode=VOL_FULL;
+        Serial.println("[AUDIO] Volume mode: FULL");
+      }
+
+      int newVol=computeVolumeForPage(currentPage);
+      setVolume(newVol);
+
+      delay(300);
       return;
-    } else if (touchVolumeWindowActive && (now - firstDrawTime) > TOUCH_VOLUME_WINDOW_MS) {
-      touchVolumeWindowActive = false;
-      Serial.println(F("[UI] Touch-volume window expired"));
     }
 
-    // Top-left region: toggle music, no navigation
-    if (touchX > 225 && touchY >= 0 && touchY < 60) {
-      Serial.println(F("[TOUCH] Top-left region tapped - toggle music"));
-      musicEnabled = !musicEnabled;
-      Serial.print(F("[AUDIO] Music now: "));
-      Serial.println(musicEnabled ? F("ON") : F("OFF"));
-      if (musicEnabled) playTrackForPage(currentPage);
-      else sendStop();
-      return;
-    }
-
-    // Normal left/right navigation based on panel X
-    int nextPage = currentPage;
-    if (touchX < SCREEN_WIDTH / 2) {
+    int nextPage=currentPage;
+    if(touchX<SCREEN_WIDTH/2){
       nextPage--;
-      Serial.println(F("[NAV] Left half touched -> previous"));
-    } else {
+      Serial.println("[NAV] Touch on left half -> previous page");
+    }else{
       nextPage++;
-      Serial.println(F("[NAV] Right half touched -> next"));
+      Serial.println("[NAV] Touch on right half -> next page");
     }
 
-    gotoPage(nextPage);
+    if(nextPage<0)nextPage=0;
+    if(nextPage>=NUM_PAGES)nextPage=NUM_PAGES-1;
+
+    if(nextPage!=currentPage){
+      Serial.print("[NAV] Changing page ");
+      Serial.print(currentPage);
+      Serial.print(" -> ");
+      Serial.println(nextPage);
+      int oldPage=currentPage;
+      currentPage=nextPage;
+      needsUpdate=true;
+
+      if(audioPlaying){
+        sendStop();
+      }
+
+      remotePageWipeForPage(oldPage,currentPage);
+      remoteSetLedEffect(pages[currentPage].ledFunc);
+      if(musicEnabled){
+        playTrackForPage(currentPage);
+      }else{
+        Serial.println("[AUDIO] Music disabled, not sending play for new page");
+      }
+
+      delay(250);
+    }else{
+      Serial.println("[NAV] Touch did not change page");
+      delay(150);
+    }
   }
 }
