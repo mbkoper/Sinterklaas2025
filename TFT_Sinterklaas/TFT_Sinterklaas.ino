@@ -57,18 +57,19 @@ struct PageData {
   const char* ledPathOnEnter;
 };
 
-#define NUM_PAGES 8
+#define NUM_PAGES 9
 #define TEXT_FONT 2
 
 const PageData pages[NUM_PAGES] = {
   {page0,"",TFT_BLACK,ANIM_NONE,1,12,-1, LED_FUNCS.led_off},
   {page1,"Een ie-rieder vervangt stapels papier,\nGewoon een handig dingetje, dat geeft plezier.\nGeen kreukels, geen ezelsoren meer,\nMaar strak digitaal, keer op keer.",TFT_BLACK,ANIM_NONE,2,14,-1, LED_FUNCS.led_rainbow},
-  {page2,"Je kiest een roman of een spannend verhaal,\nEn leest het meteen, digitaal en ideaal,\nJe bladert nu licht, zo snel en fijn,\nMet honderden titels in een klein design.",TFT_BLACK,ANIM_NONE,6,14,-1, LED_FUNCS.led_rainbow},
-  {page3,"De batterij houdt dagenlang stand,\nDus lezen kan overal in het land,\nDe pieten zagen je boeken verslinden,\nMaar soms was het lastig om ze te vinden",TFT_BLACK,ANIM_NONE,5,10,-1, LED_FUNCS.led_rainbow},
+  {page2,"Je kiest een roman of een spannend verhaal,\nEn leest het meteen, digitaal en ideaal,\nJe bladert nu licht, zo snel en fijn,\nMet honderden titels in een klein design.",TFT_BLACK,ANIM_NONE,6,10,-1, LED_FUNCS.led_rainbow},
+  {page3,"De batterij houdt dagenlang stand,\nDus lezen kan overal in het land,\nDe pieten zagen je boeken verslinden,\nMaar soms was het lastig om ze te vinden",TFT_BLACK,ANIM_NONE,5,14,-1, LED_FUNCS.led_rainbow},
   {bomb,"",TFT_RED,ANIM_SHAKE,9,26,3, LED_FUNCS.led_flash_red},
   {jollyroger,"EEN PIRAAT!\nDIT KAN TOCH\nNIET WAAR ZIJN",TFT_RED,ANIM_INVERT,8,20,12, LED_FUNCS.led_flash_white},
-  {page4,"Piraat zijn! Sint fronste zijn wenkbrauw,\nCorina, dit gedrag past echt niet bij jou,\nWant boeken “stelen”, goede vrind,\nVerdien je geen applaus van de Sint.",TFT_BLACK,ANIM_NONE,3,14,-1, LED_FUNCS.led_rainbow},
-  {page5,"Zoek het cadeau dat je beter kan maken,\nZodat je piraat activiteiten kunt staken,\nMet dit geschenk lees je eerlijk en fijn,\nEn zal de Sint weer vast tevreden zijn.",TFT_BLACK,ANIM_NONE,4,14,-1, LED_FUNCS.led_color_orange}
+  {page4,"Piraat zijn! Sint fronste zijn wenkbrauw,\nCorina, dit gedrag past echt niet bij jou,\nWant boeken “stelen”, goede vrind,\nVerdien je geen applaus van de Sint.",TFT_BLACK,ANIM_NONE,3,24,-1, LED_FUNCS.led_rainbow},
+  {page5,"Zoek het cadeau dat je beter kan maken,\nZodat je piraat activiteiten kunt staken,\nMet dit geschenk lees je eerlijk en fijn,\nEn zal de Sint weer vast tevreden zijn.",TFT_BLACK,ANIM_NONE,4,14,-1, LED_FUNCS.led_color_orange},
+  {page1,"En nu vlot naar de cadeaus op zoek,\nKijk ook in dit mooie boek.\nWe zijn nu echt wel klaar,\ngraag weer tot volgend jaar!\n\nTHE END",TFT_BLACK,ANIM_NONE,2,14,20, LED_FUNCS.led_off}
 };
 
 TFT_eSPI tft = TFT_eSPI();
@@ -216,8 +217,7 @@ void setVolume(int vol) {
   }
   Serial.print("[AUDIO] Setting volume to ");
   Serial.println(vol);
-  // String url = String(AUDIO_BASE_URL) + "/volume?val=" + String(vol);
-  String url = String(AUDIO_BASE_URL) + "/volume?val=" + String(5);
+  String url = String(AUDIO_BASE_URL) + "/volume?val=" + String(vol);
   httpGetFireAndForget(url);
   currentVolume = vol;
 }
