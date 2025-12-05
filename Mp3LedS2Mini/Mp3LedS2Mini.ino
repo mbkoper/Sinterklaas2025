@@ -9,7 +9,7 @@ class Mp3Notify;
 typedef DFMiniMp3<HardwareSerial, Mp3Notify> DfMp3;
 DfMp3 dfmp3(Serial1);
 
-volatile uint16_t currentTrack = 0;
+volatile uint16_t currentTrack = 0;  // track currently playing
 
 class Mp3Notify {
 public:
@@ -17,6 +17,7 @@ public:
     Serial.printf("[MP3] Com Error %u\n", errorCode);
   }
 
+  // Replay the same track when finished
   static void OnPlayFinished(DfMp3& mp3, DfMp3_PlaySources source, uint16_t track) {
     Serial.printf("[MP3] Finished track #%u, replaying track #%u\n", track, currentTrack);
     dfmp3.playMp3FolderTrack(currentTrack);
@@ -35,393 +36,254 @@ public:
 
 // -------------------- LED Setup --------------------
 #define LED_PIN 18
-#define NUM_LEDS 30
+#define NUM_LEDS 8        // 8 LEDs total
 CRGB leds[NUM_LEDS];
+
+// Global base brightness (0..255). Normal effects run at 50% of this.
+// Flash effects run at full 255 regardless.
 uint8_t ledBrightness = 128;
 
-// LED effects controlled over HTTP
-enum LedEffect {
-  LED_OFF = 0,
-  LED_ON_WHITE = 1,
-  LED_RAINBOW = 2,
-  LED_FLASHING_YELLOW = 3,
-  LED_FLASHING_RED = 4,
-  LED_PAGE_WIPE_LEFT = 5,
-  LED_PAGE_WIPE_RIGHT = 6,
-  LED_THUNDER = 7
-};
+// For wipe animations, assume 4 LEDs left and 4 LEDs right, wired serially.
+const uint8_t LEFT_COL[]  = { 0, 1, 2, 3 };
+const uint8_t RIGHT_COL[] = { 4, 5, 6, 7 };
+const uint8_t COL_COUNT = 4;
 
-LedEffect currentLedEffect = LED_OFF;
+// Maximum total wipe duration (ms) for both columns combined.
+const uint16_t WIPE_TOTAL_MS = 300;
 
-// Shared animation state
-uint8_t rainbowHue = 0;
-bool flashState = false;
-unsigned long lastLedUpdate = 0;
-constexpr unsigned long RAINBOW_INTERVAL = 50;
-constexpr unsigned long FLASH_INTERVAL   = 400;
+// -------------------- Rainbow animation state --------------------
+bool rainbowActive = false;
+uint8_t rainbowHueBase = 0;
+unsigned long lastRainbowUpdate = 0;
+const uint16_t RAINBOW_INTERVAL_MS = 30;  // update every 30 ms
 
-// Page-wipe state
-bool pageWipeActive = false;
-int pageWipeIndex = 0;
-unsigned long pageWipeLast = 0;
-constexpr unsigned long PAGE_WIPE_INTERVAL = 60;
-CRGB pageWipeColor = CRGB::White;
-bool pageWipeLeftToRight = true;
-
-// Thunder state
-bool thunderInFlash = false;
-unsigned long thunderNextAt = 0;
-unsigned long thunderFlashEnd = 0;
-int thunderBurstsRemaining = 0;
-constexpr unsigned long THUNDER_MIN_GAP   = 300;
-constexpr unsigned long THUNDER_MAX_GAP   = 3000;
-constexpr unsigned long THUNDER_FLASH_MIN = 40;
-constexpr unsigned long THUNDER_FLASH_MAX = 180;
+// -------------------- Continuous flash state --------------------
+bool flashActive = false;
+CRGB flashColor = CRGB::White;
+bool flashOn = false;
+unsigned long lastFlashToggle = 0;
+const uint16_t FLASH_INTERVAL_MS = 150;  // 150 ms ON, 150 ms OFF
 
 // -------------------- WiFi + WebServer --------------------
 WebServer server(80);
-const char* ssid     = "ESP32_MP3_AP";
+const char* ssid = "ESP32_MP3_AP";
 const char* password = "12345678";
 
-// -------------------- Web UI --------------------
-const char MAIN_page[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>ESP32 MP3 + LED Controller</title>
-  <style>
-    body { font-family: Arial; margin: 20px; background: #f4f4f4; }
-    h2 { margin-top: 30px; }
-    button { margin: 5px; padding: 10px 15px; font-size: 14px; }
-    input[type=range] { width: 250px; vertical-align: middle; }
-    .section { background: #fff; padding: 15px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 0 5px rgba(0,0,0,0.1); }
-    .inline { display: inline-block; margin-left: 10px; min-width: 40px; text-align: right; }
-  </style>
-</head>
-<body>
-  <h1>ESP32 MP3 + LED Controller</h1>
+// -------------------- Helper functions --------------------
 
-  <div class="section">
-    <h2>MP3 Controls</h2>
-    <div id="trackButtons"></div>
-    <button onclick="fetch('/stop')">Stop</button>
-    <br><br>
-    <label>Volume:</label>
-    <input type="range" min="0" max="30" id="volSlider"
-           oninput="setVolume(this.value)">
-    <span class="inline" id="volVal">-</span>
-    <div style="margin-top:8px;">Current track: <span id="statusTrack">-</span></div>
-  </div>
-
-  <div class="section">
-    <h2>LED Controls</h2>
-    <button onclick="fetch('/led/on')">On (White)</button>
-    <button onclick="fetch('/led/off')">Off</button>
-    <button onclick="fetch('/led/rainbow')">Rainbow</button>
-    <button onclick="setColor(255,0,0)">Red</button>
-    <button onclick="setColor(0,255,0)">Green</button>
-    <button onclick="setColor(0,0,255)">Blue</button>
-    <br><br>
-    <label>Brightness:</label>
-    <input type="range" min="0" max="255" id="intSlider"
-           oninput="setIntensity(this.value)">
-  </div>
-
-  <script>
-    function setVolume(v) {
-      fetch('/volume?val=' + v);
-      document.getElementById('volVal').innerText = v;
-    }
-    function setColor(r,g,b) {
-      fetch('/led/setcolor?r='+r+'&g='+g+'&b='+b);
-    }
-    function setIntensity(v) {
-      fetch('/led/intensity?val=' + v);
-    }
-    function refreshStatus() {
-      fetch('/status').then(r => r.json()).then(j => {
-        document.getElementById('volVal').innerText = j.volume;
-        document.getElementById('statusTrack').innerText = j.track;
-        document.getElementById('volSlider').value = j.volume;
-        document.getElementById('intSlider').value = j.brightness;
-      }).catch(e => console.log(e));
-    }
-    function buildTrackButtons() {
-      const container = document.getElementById('trackButtons');
-      for (let i=1;i<=9;i++) {
-        const b = document.createElement('button');
-        b.innerText = 'Track ' + i;
-        b.onclick = () => fetch('/play?track=' + i);
-        container.appendChild(b);
-      }
-    }
-    buildTrackButtons();
-    refreshStatus();
-    setInterval(refreshStatus, 1000);
-  </script>
-</body>
-</html>
-)rawliteral";
-
-// -------------------- JSON helpers --------------------
-const char JSON_ERR_MISSING_TRACK[]   PROGMEM = "{\"error\":\"missing track arg\"}";
-const char JSON_ERR_INVALID_TRACK[]   PROGMEM = "{\"error\":\"invalid track (1..9)\"}";
-const char JSON_ERR_MISSING_VAL[]     PROGMEM = "{\"error\":\"missing val arg\"}";
-const char JSON_ERR_MISSING_RGB[]     PROGMEM = "{\"error\":\"missing r,g,b\"}";
-const char JSON_ERR_MISSING_MODE[]    PROGMEM = "{\"error\":\"missing mode\"}";
-const char JSON_ERR_INVALID_MODE[]    PROGMEM = "{\"error\":\"invalid mode\"}";
-const char JSON_ERR_MISSING_COLOR[]   PROGMEM = "{\"error\":\"missing color\"}";
-const char JSON_STATUS_PLAYING[]      PROGMEM = "{\"status\":\"playing\"}";
-const char JSON_STATUS_STOPPED[]      PROGMEM = "{\"status\":\"stopped\"}";
-const char JSON_STATUS_LEDS_ON[]      PROGMEM = "{\"status\":\"leds on\"}";
-const char JSON_STATUS_LEDS_OFF[]     PROGMEM = "{\"status\":\"leds off\"}";
-const char JSON_STATUS_RAINBOW[]      PROGMEM = "{\"status\":\"rainbow\"}";
-const char JSON_STATUS_COLOR_SET[]    PROGMEM = "{\"status\":\"color set\"}";
-const char JSON_STATUS_INTENSITY_SET[]PROGMEM = "{\"status\":\"intensity set\"}";
-const char JSON_STATUS_MODE_SET[]     PROGMEM = "{\"status\":\"mode set\"}";
-const char JSON_STATUS_PAGEWIPE[]     PROGMEM = "{\"status\":\"page wipe started\"}";
-
-inline void sendJsonP200(const char* json) {
-  server.send_P(200, "application/json", json);
-}
-inline void sendJsonP400(const char* json) {
-  server.send_P(400, "application/json", json);
+// Stop all ongoing animated modes (rainbow, flash)
+void stopAnimations() {
+  rainbowActive = false;
+  flashActive = false;
 }
 
-// -------------------- LED effect control --------------------
-void setLedEffect(LedEffect effect) {
-  currentLedEffect = effect;
-  pageWipeActive = false;
-  thunderInFlash = false;
-  thunderBurstsRemaining = 0;
+// Effective value for normal effects (50% of user brightness) or full (255) for flash.
+static uint8_t effectiveValue(bool full = false) {
+  if (full) return 255;
+  return (uint8_t)(ledBrightness / 2);
+}
 
-  switch (effect) {
-    case LED_OFF:
-      FastLED.clear(true);
-      break;
-    case LED_ON_WHITE:
-      fill_solid(leds, NUM_LEDS, CRGB::White);
+// Animate a column sequentially (used for wipes).
+void animateColumnSequential(const uint8_t* indices, uint8_t count, uint8_t maxV, int steps, int stepDelayMs) {
+  for (uint8_t i = 0; i < count; ++i) {
+    // Previous LEDs in column at full brightness
+    for (uint8_t p = 0; p < i; ++p) {
+      leds[indices[p]] = CRGB(0, maxV, 0);
+    }
+    // Fade current LED
+    for (int s = 0; s <= steps; ++s) {
+      uint8_t g = (uint32_t)maxV * s / steps;
+      leds[indices[i]] = CRGB(0, g, 0);
       FastLED.show();
-      break;
-    case LED_RAINBOW:
-      // will animate in updateLeds
-      break;
-    case LED_FLASHING_YELLOW:
-    case LED_FLASHING_RED:
-      // will animate in updateLeds
-      break;
-    case LED_PAGE_WIPE_LEFT:
-    case LED_PAGE_WIPE_RIGHT:
-      pageWipeActive = true;
-      pageWipeIndex = 0;
-      pageWipeLast = millis();
-      break;
-    case LED_THUNDER:
-      thunderBurstsRemaining = random(3, 7);
-      thunderNextAt = millis() + random(THUNDER_MIN_GAP, THUNDER_MAX_GAP);
-      break;
-  }
-}
-
-void updateLeds() {
-  const unsigned long now = millis();
-  bool changed = false;
-
-  switch (currentLedEffect) {
-    case LED_OFF:
-      // Nothing to do, already cleared when effect set
-      break;
-
-    case LED_ON_WHITE:
-      // Static, no animation
-      break;
-
-    case LED_RAINBOW:
-      if (now - lastLedUpdate >= RAINBOW_INTERVAL) {
-        lastLedUpdate = now;
-        fill_rainbow(leds, NUM_LEDS, rainbowHue++);
-        changed = true;
-      }
-      break;
-
-    case LED_FLASHING_YELLOW:
-    case LED_FLASHING_RED:
-      if (now - lastLedUpdate >= FLASH_INTERVAL) {
-        lastLedUpdate = now;
-        flashState = !flashState;
-        CRGB color = (currentLedEffect == LED_FLASHING_YELLOW) ? CRGB::Yellow : CRGB::Red;
-        fill_solid(leds, NUM_LEDS, flashState ? color : CRGB::Black);
-        changed = true;
-      }
-      break;
-
-    case LED_PAGE_WIPE_LEFT:
-    case LED_PAGE_WIPE_RIGHT:
-      if (pageWipeActive && now - pageWipeLast >= PAGE_WIPE_INTERVAL) {
-        pageWipeLast = now;
-        // clear all first
-        FastLED.clear(false);
-        if (pageWipeLeftToRight) {
-          for (int i = 0; i <= pageWipeIndex && i < NUM_LEDS; ++i) {
-            leds[i] = pageWipeColor;
-          }
-        } else {
-          for (int i = 0; i <= pageWipeIndex && i < NUM_LEDS; ++i) {
-            leds[NUM_LEDS - 1 - i] = pageWipeColor;
-          }
-        }
-        pageWipeIndex++;
-        if (pageWipeIndex >= NUM_LEDS) {
-          pageWipeActive = false;
-        }
-        changed = true;
-      }
-      break;
-
-    case LED_THUNDER:
-      if (!thunderInFlash) {
-        if (thunderBurstsRemaining > 0 && now >= thunderNextAt) {
-          thunderInFlash = true;
-          thunderFlashEnd = now + random(THUNDER_FLASH_MIN, THUNDER_FLASH_MAX);
-          fill_solid(leds, NUM_LEDS, CRGB::White);
-          changed = true;
-        }
-      } else {
-        if (now >= thunderFlashEnd) {
-          thunderInFlash = false;
-          thunderBurstsRemaining--;
-          FastLED.clear(false);
-          changed = true;
-          if (thunderBurstsRemaining > 0) {
-            thunderNextAt = now + random(THUNDER_MIN_GAP, THUNDER_MAX_GAP);
-          }
-        }
-      }
-      break;
-  }
-
-  if (changed) {
-    FastLED.show();
+      delay(stepDelayMs);
+    }
+    leds[indices[i]] = CRGB(0, maxV, 0);
   }
 }
 
 // -------------------- API Handlers --------------------
+
+// Root handler – no web page, just a simple JSON info message.
 void handleRoot() {
-  server.send_P(200, "text/html", MAIN_page);
+  server.send(200, "application/json", "{\"status\":\"ok\",\"info\":\"ESP32 MP3 + LED API\"}");
 }
 
 void handlePlay() {
   if (!server.hasArg("track")) {
-    sendJsonP400(JSON_ERR_MISSING_TRACK);
+    server.send(400, "application/json", "{\"error\":\"missing track arg\"}");
     return;
   }
+
   uint16_t track = server.arg("track").toInt();
   if (track < 1 || track > 9) {
-    sendJsonP400(JSON_ERR_INVALID_TRACK);
+    server.send(400, "application/json", "{\"error\":\"invalid track (1..9)\"}");
     return;
   }
+
   currentTrack = track;
   Serial.printf("[MP3] Playing track %u\n", currentTrack);
+
+  // Immediately acknowledge (non-blocking to caller)
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
+  // Perform action after responding
   dfmp3.playMp3FolderTrack(currentTrack);
-  sendJsonP200(JSON_STATUS_PLAYING);
 }
 
 void handleStop() {
+  // Immediately acknowledge
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
   dfmp3.stop();
-  Serial.println(F("[MP3] Stopped playback"));
-  sendJsonP200(JSON_STATUS_STOPPED);
+  Serial.println("[MP3] Stopped playback");
 }
 
 void handleVolume() {
   if (!server.hasArg("val")) {
-    sendJsonP400(JSON_ERR_MISSING_VAL);
+    server.send(400, "application/json", "{\"error\":\"missing val arg\"}");
     return;
   }
+
   int vol = constrain(server.arg("val").toInt(), 0, 30);
-  dfmp3.setVolume(vol);
   Serial.printf("[MP3] Volume set to %d\n", vol);
-  sendJsonP200(JSON_STATUS_PLAYING);
+
+  // Immediately acknowledge
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
+  dfmp3.setVolume(vol);
 }
 
-// Simple LED endpoints mapping to effects
+// /led/on – simple solid white (no long animation)
 void handleLedOn() {
-  setLedEffect(LED_ON_WHITE);
-  sendJsonP200(JSON_STATUS_LEDS_ON);
-}
-void handleLedOff() {
-  setLedEffect(LED_OFF);
-  sendJsonP200(JSON_STATUS_LEDS_OFF);
-}
-void handleLedRainbow() {
-  setLedEffect(LED_RAINBOW);
-  sendJsonP200(JSON_STATUS_RAINBOW);
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+  stopAnimations();
+  fill_solid(leds, NUM_LEDS, CRGB::White);
+  FastLED.show();
 }
 
-// Static color (no animation)
+// /led/off – clear all LEDs
+void handleLedOff() {
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+  stopAnimations();
+  FastLED.clear();
+  FastLED.show();
+}
+
+// /led/rainbow – start animated rainbow at 50% of base brightness
+void handleLedRainbow() {
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
+  stopAnimations();
+  rainbowActive = true;
+  rainbowHueBase = 0;
+  lastRainbowUpdate = 0;
+}
+
+// /led/setcolor?r=R&g=G&b=B – solid color scaled to 50% of base brightness
 void handleLedSetColor() {
-  if (!(server.hasArg("r") && server.hasArg("g") && server.hasArg("b"))) {
-    sendJsonP400(JSON_ERR_MISSING_RGB);
+  if (!server.hasArg("r") || !server.hasArg("g") || !server.hasArg("b")) {
+    server.send(400, "application/json", "{\"error\":\"missing r,g,b\"}");
     return;
   }
+
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
+  stopAnimations();
+
   int r = constrain(server.arg("r").toInt(), 0, 255);
   int g = constrain(server.arg("g").toInt(), 0, 255);
   int b = constrain(server.arg("b").toInt(), 0, 255);
-  setLedEffect(LED_OFF);
-  fill_solid(leds, NUM_LEDS, CRGB(r,g,b));
+
+  uint8_t v = effectiveValue(false);
+  uint8_t sr = (uint32_t)r * v / 255;
+  uint8_t sg = (uint32_t)g * v / 255;
+  uint8_t sb = (uint32_t)b * v / 255;
+
+  fill_solid(leds, NUM_LEDS, CRGB(sr, sg, sb));
   FastLED.show();
-  sendJsonP200(JSON_STATUS_COLOR_SET);
 }
 
+// /led/intensity?val=N – update base brightness (doesn't change patterns immediately)
 void handleLedIntensity() {
   if (!server.hasArg("val")) {
-    sendJsonP400(JSON_ERR_MISSING_VAL);
+    server.send(400, "application/json", "{\"error\":\"missing val\"}");
     return;
   }
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
   ledBrightness = constrain(server.arg("val").toInt(), 0, 255);
-  FastLED.setBrightness(ledBrightness);
+  FastLED.setBrightness(255);  // keep hardware full; we scale in software
+  // Current pattern (rainbow/flash/solid) will adapt on next update
+}
+
+// /led/wipe_right – left 4 LEDs then right 4 LEDs wipe in green at 50%,
+// with total wipe duration ≈ WIPE_TOTAL_MS (300 ms) for both columns.
+void handleLedWipeRight() {
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
+  stopAnimations();
+
+  uint8_t v = effectiveValue(false);
+  const int steps = 20;
+  uint32_t perColumnMs = WIPE_TOTAL_MS / 2;  // 150 ms per column
+  int32_t stepDelayMs = perColumnMs / (COL_COUNT * (steps + 1));
+  if (stepDelayMs < 1) stepDelayMs = 1;
+
+  animateColumnSequential(LEFT_COL, COL_COUNT, v, steps, stepDelayMs);
+  animateColumnSequential(RIGHT_COL, COL_COUNT, v, steps, stepDelayMs);
+
+  for (uint8_t i = 0; i < COL_COUNT; ++i) {
+    leds[LEFT_COL[i]]  = CRGB(0, v, 0);
+    leds[RIGHT_COL[i]] = CRGB(0, v, 0);
+  }
   FastLED.show();
-  sendJsonP200(JSON_STATUS_INTENSITY_SET);
 }
 
-// /led/mode?mode=N  (0..7) used by TFT board
-void handleLedModeApi() {
-  if (!server.hasArg("mode")) {
-    sendJsonP400(JSON_ERR_MISSING_MODE);
-    return;
+// /led/wipe_left – right 4 LEDs then left 4 LEDs wipe in green at 50%,
+// with total wipe duration ≈ WIPE_TOTAL_MS (300 ms) for both columns.
+void handleLedWipeLeft() {
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
+  stopAnimations();
+
+  uint8_t v = effectiveValue(false);
+  const int steps = 20;
+  uint32_t perColumnMs = WIPE_TOTAL_MS / 2;  // 150 ms per column
+  int32_t stepDelayMs = perColumnMs / (COL_COUNT * (steps + 1));
+  if (stepDelayMs < 1) stepDelayMs = 1;
+
+  animateColumnSequential(RIGHT_COL, COL_COUNT, v, steps, stepDelayMs);
+  animateColumnSequential(LEFT_COL, COL_COUNT, v, steps, stepDelayMs);
+
+  for (uint8_t i = 0; i < COL_COUNT; ++i) {
+    leds[LEFT_COL[i]]  = CRGB(0, v, 0);
+    leds[RIGHT_COL[i]] = CRGB(0, v, 0);
   }
-  int m = server.arg("mode").toInt();
-  if (m < LED_OFF || m > LED_THUNDER) {
-    sendJsonP400(JSON_ERR_INVALID_MODE);
-    return;
-  }
-  setLedEffect(static_cast<LedEffect>(m));
-  sendJsonP200(JSON_STATUS_MODE_SET);
+  FastLED.show();
 }
 
-// /led/pagewipe?color=rrggbb&dir=left|right
-void handleLedPageWipe() {
-  String hex = "ffffff";
+// /led/flash?color=red|white – start continuous flash at 100% intensity
+// in requested color, 150 ms ON / 150 ms OFF, until next LED command.
+void handleLedFlash() {
+  String color = "white";
   if (server.hasArg("color")) {
-    hex = server.arg("color");
-    hex.replace("#", "");
+    color = server.arg("color");
+    color.toLowerCase();
   }
-  if (hex.length() != 6) hex = "ffffff";
-  long rgb = strtol(hex.c_str(), NULL, 16);
-  int r = (rgb >> 16) & 0xFF;
-  int g = (rgb >> 8) & 0xFF;
-  int b = rgb & 0xFF;
-  pageWipeColor = CRGB(r,g,b);
 
-  bool leftToRight = true;
-  if (server.hasArg("dir")) {
-    String d = server.arg("dir");
-    d.toLowerCase();
-    if (d == "right") leftToRight = false;
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+
+  stopAnimations();
+
+  if (color == "red") {
+    flashColor = CRGB::Red;
+  } else {
+    flashColor = CRGB::White;
   }
-  pageWipeLeftToRight = leftToRight;
-  setLedEffect(leftToRight ? LED_PAGE_WIPE_LEFT : LED_PAGE_WIPE_RIGHT);
-  sendJsonP200(JSON_STATUS_PAGEWIPE);
+
+  flashActive = true;
+  flashOn = false;              // start from OFF, will toggle to ON in loop()
+  lastFlashToggle = 0;          // force immediate toggle
 }
 
 void handleStatus() {
@@ -436,45 +298,80 @@ void handleStatus() {
 // -------------------- Setup --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println(F("[SYS] Initializing..."));
+  Serial.println("[SYS] Initializing...");
 
+  // MP3 init
   dfmp3.begin(16,17); 
   dfmp3.reset(); 
   dfmp3.setVolume(12);
-  Serial.println(F("[MP3] DFPlayer initialized"));
+  Serial.println("[MP3] DFPlayer initialized");
 
+  // LED init
   FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
-  FastLED.setBrightness(ledBrightness);
+  FastLED.setBrightness(255);
   FastLED.clear(true);
-  setLedEffect(LED_OFF);
-  Serial.println(F("[LED] FastLED initialized"));
+  Serial.println("[LED] FastLED initialized");
 
-  WiFi.softAP(ssid, password);
-  Serial.print(F("[WiFi] AP started, IP: ")); 
+  // WiFi AP
+  WiFi.softAP(ssid,password);
+  Serial.print("[WiFi] AP started, IP: "); 
   Serial.println(WiFi.softAPIP());
 
-  server.on("/",           handleRoot);
-  server.on("/play",       handlePlay);
-  server.on("/stop",       handleStop);
-  server.on("/volume",     handleVolume);
-
-  server.on("/led/on",        handleLedOn);
-  server.on("/led/off",       handleLedOff);
-  server.on("/led/rainbow",   handleLedRainbow);
-  server.on("/led/setcolor",  handleLedSetColor);
+  // WebServer routes
+  server.on("/", handleRoot);
+  server.on("/play", handlePlay);
+  server.on("/stop", handleStop);
+  server.on("/volume", handleVolume);
+  server.on("/led/on", handleLedOn);
+  server.on("/led/off", handleLedOff);
+  server.on("/led/rainbow", handleLedRainbow);
+  server.on("/led/wipe_right", handleLedWipeRight);
+  server.on("/led/wipe_left", handleLedWipeLeft);
+  server.on("/led/flash", handleLedFlash);
+  server.on("/led/setcolor", handleLedSetColor);
   server.on("/led/intensity", handleLedIntensity);
-  server.on("/led/mode",      handleLedModeApi);
-  server.on("/led/pagewipe",  handleLedPageWipe);
-
   server.on("/status", handleStatus);
 
   server.begin();
-  Serial.println(F("[HTTP] Web server started"));
+  Serial.println("[HTTP] Web server started");
 }
 
 // -------------------- Loop --------------------
 void loop() {
   server.handleClient();
-  dfmp3.loop();
-  updateLeds();
+  dfmp3.loop(); // process DFPlayer notifications
+
+  unsigned long now = millis();
+
+  // Animate rainbow non-blockingly if active, evenly across NUM_LEDS (=8)
+  if (rainbowActive) {
+    if (now - lastRainbowUpdate >= RAINBOW_INTERVAL_MS) {
+      lastRainbowUpdate = now;
+      rainbowHueBase++;
+
+      uint8_t v = effectiveValue(false);
+      for (int i = 0; i < NUM_LEDS; i++) {
+        // Even spacing around the full hue circle: 0,32,64,...,224
+        uint8_t hue = rainbowHueBase + (i * 256 / NUM_LEDS);
+        leds[i] = CHSV(hue, 255, v);
+      }
+      FastLED.show();
+    }
+  }
+
+  // Animate continuous flash non-blockingly if active
+  if (flashActive) {
+    if (now - lastFlashToggle >= FLASH_INTERVAL_MS) {
+      lastFlashToggle = now;
+      flashOn = !flashOn;
+
+      if (flashOn) {
+        fill_solid(leds, NUM_LEDS, flashColor);
+        FastLED.setBrightness(255);
+      } else {
+        FastLED.clear();
+      }
+      FastLED.show();
+    }
+  }
 }
