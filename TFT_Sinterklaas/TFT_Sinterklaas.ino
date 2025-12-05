@@ -67,7 +67,7 @@ const PageData pages[NUM_PAGES] = {
   {page3,"De batterij houdt dagenlang stand,\nDus lezen kan overal in het land,\nDe pieten zagen je boeken verslinden,\nMaar soms was het lastig om ze te vinden",TFT_BLACK,ANIM_NONE,5,14,-1, LED_FUNCS.led_rainbow},
   {bomb,"",TFT_RED,ANIM_SHAKE,9,26,3, LED_FUNCS.led_flash_red},
   {jollyroger,"EEN PIRAAT!\nDIT KAN TOCH\nNIET WAAR ZIJN",TFT_RED,ANIM_INVERT,8,20,12, LED_FUNCS.led_flash_white},
-  {page4,"Piraat zijn! Sint fronste zijn wenkbrauw,\nCorina, dit gedrag past echt niet bij jou,\nWant boeken “stelen”, goede vrind,\nVerdien je geen applaus van de Sint.",TFT_BLACK,ANIM_NONE,3,24,-1, LED_FUNCS.led_rainbow},
+  {page4,"Piraat zijn! Sint fronste zijn wenkbrauw,\nCorina, dit gedrag past echt niet bij jou,\nWant boeken “stelen”, goede vrind,\nVerdien je geen applaus van de Sint.",TFT_BLACK,ANIM_NONE,3,14,-1, LED_FUNCS.led_rainbow},
   {page5,"Zoek het cadeau dat je beter kan maken,\nZodat je piraat activiteiten kunt staken,\nMet dit geschenk lees je eerlijk en fijn,\nEn zal de Sint weer vast tevreden zijn.",TFT_BLACK,ANIM_NONE,4,14,-1, LED_FUNCS.led_color_orange},
   {page1,"En nu vlot naar de cadeaus op zoek,\nKijk ook in dit mooie boek.\nWe zijn nu echt wel klaar,\ngraag weer tot volgend jaar!\n\nTHE END",TFT_BLACK,ANIM_NONE,2,14,20, LED_FUNCS.led_off}
 };
